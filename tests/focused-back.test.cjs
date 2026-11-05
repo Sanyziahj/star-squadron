@@ -14,6 +14,30 @@ function overlap(a, b) {
   return ix > 0.5 && iy > 0.5;
 }
 
+async function heldFit(page) {
+  const handles = await page.locator('#srml-menu .srml-b, #srml-act .srml-b, #stick').elementHandles();
+  const rows = [];
+  for (const el of handles) {
+    await el.evaluate(e => e.classList.add('on'));
+    await page.waitForTimeout(100);
+    rows.push(await el.evaluate(e => {
+      const canvas = document.querySelector('#game').getBoundingClientRect();
+      const r = e.getBoundingClientRect();
+      const hit = !(r.right <= canvas.left + 0.5 || r.left >= canvas.right - 0.5 || r.bottom <= canvas.top + 0.5 || r.top >= canvas.bottom - 0.5);
+      return {
+        text: (e.textContent || e.id || '').trim(),
+        x: +r.x.toFixed(1), y: +r.y.toFixed(1), w: +r.width.toFixed(1), h: +r.height.toFixed(1),
+        right: +r.right.toFixed(1), bottom: +r.bottom.toFixed(1),
+        overlap: hit,
+        clipped: r.x < -0.5 || r.y < -0.5 || r.right > innerWidth + 0.5 || r.bottom > innerHeight + 0.5
+      };
+    }));
+    await el.evaluate(e => e.classList.remove('on'));
+  }
+  const usesSafe = await page.evaluate(() => [...document.querySelectorAll('style')].some(s => s.textContent.includes('env(safe-area-inset-left')));
+  return { rows, usesSafe };
+}
+
 (async () => {
   const b = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: CHROME });
   const errs = [];
@@ -314,13 +338,28 @@ function overlap(a, b) {
     const start = await p.locator('[data-b=start]').boundingBox();
     ok('portrait no horizontal overflow', lay.sw <= lay.iw + 1, lay);
     ok('portrait controls do not cover the canvas', !overlap(game, stick) && !overlap(game, back) && !overlap(game, fire) && !overlap(game, start), { game, stick, back, fire, start });
+    const held = await heldFit(p);
+    const bad = held.rows.filter(r => r.clipped || r.overlap);
+    ok('portrait held buttons stay fully visible and off the canvas', held.usesSafe && bad.length === 0, bad.length ? bad : held.rows.filter(r => r.text === 'BACK' || r.text === 'RESUME' || r.text === 'FIRE'));
+    await p.evaluate(() => document.querySelector('.srml-bk').classList.add('on'));
+    await p.waitForTimeout(100);
+    await p.screenshot({ path: D + 'phone_390x844_held_back.png' });
+    await p.evaluate(() => document.querySelector('.srml-bk').classList.remove('on'));
+    await p.evaluate(() => {
+      const s = document.documentElement.style;
+      s.setProperty('--srml-inset-l', '40px'); s.setProperty('--srml-inset-r', '28px'); s.setProperty('--srml-inset-b', '20px');
+    });
+    const safe = await heldFit(p);
+    const safeBad = safe.rows.filter(r => r.clipped || r.overlap || r.x < 40 - 0.5);
+    ok('portrait safe-area inset keeps held buttons inside', safeBad.length === 0, safeBad);
+    await p.evaluate(() => { document.documentElement.style.removeProperty('--srml-inset-l'); document.documentElement.style.removeProperty('--srml-inset-r'); document.documentElement.style.removeProperty('--srml-inset-b'); });
   }
 
   // ---------- landscape ----------
   const L = await phone(844, 390);
   await L.screenshot({ path: D + 'phone_844x390_title_back.png' });
   const lb = await L.locator('.srml-bk').boundingBox();
-  ok('landscape BACK is the side control (~136x42)', lb && lb.width >= 120 && lb.width <= 150 && lb.height >= 40 && lb.height <= 48, lb);
+  ok('landscape BACK stays a large labeled target', lb && lb.width >= 110 && lb.width <= 140 && lb.height >= 40 && lb.height <= 48, lb);
   ok('landscape BACK label is BACK', (await snap(L)).back === 'BACK');
   await L.evaluate(() => { window.__fireDowns = 0; __SS.bolts.length = 0; });
   await tap(L, '.srml-bk');
@@ -342,6 +381,22 @@ function overlap(a, b) {
   const okb = await L.locator('[data-srml=ok]').boundingBox();
   ok('landscape no horizontal overflow', lay.sw <= lay.iw + 1, lay);
   ok('landscape controls do not cover the canvas', !overlap(game, stick) && !overlap(game, back) && !overlap(game, fire) && !overlap(game, okb), { game, stick, back, fire, okb });
+  const heldL = await heldFit(L);
+  const badL = heldL.rows.filter(r => r.clipped || r.overlap);
+  ok('landscape held buttons stay fully visible and off the canvas', heldL.usesSafe && badL.length === 0, badL.length ? badL : heldL.rows);
+  await L.evaluate(() => document.querySelector('.srml-bk').classList.add('on'));
+  await L.waitForTimeout(100);
+  await L.screenshot({ path: D + 'phone_844x390_held_resume.png' });
+  await L.evaluate(() => document.querySelector('.srml-bk').classList.remove('on'));
+  await L.evaluate(() => {
+    const s = document.documentElement.style;
+    s.setProperty('--srml-inset-l', '40px'); s.setProperty('--srml-inset-r', '28px');
+    s.setProperty('--srml-inset-t', '24px'); s.setProperty('--srml-inset-b', '20px');
+  });
+  const safeL = await heldFit(L);
+  const safeBadL = safeL.rows.filter(r => r.clipped || r.overlap || r.x < 40 - 0.5);
+  ok('landscape safe-area inset keeps held buttons inside', safeBadL.length === 0, safeBadL.length ? safeBadL : safeL.rows);
+  await L.evaluate(() => ['--srml-inset-l','--srml-inset-r','--srml-inset-t','--srml-inset-b'].forEach(k => document.documentElement.style.removeProperty(k)));
 
   // ---------- desktop ----------
   const d = await b.newPage({ viewport: { width: 1152, height: 900 }, hasTouch: false, isMobile: false });
@@ -382,48 +437,59 @@ function overlap(a, b) {
   const resumed = await d.evaluate(() => ({ state: __SS.G.state, paused: __SS.G.paused, score: __SS.P.score }));
   ok('desktop P pauses and Enter resumes without resetting', paused.paused === true && paused.state === 'play' && resumed.paused === false && resumed.score === 41, { paused, resumed });
 
-  // ---------- calibrated 4x stage-1 moving + firing rAF ----------
+  // One stage-1 moving+firing sample under Chrome CPU throttle 4x.
+  // The earlier raf-stage1.json was four unthrottled windows, not 4x.
   {
     await p.bringToFront();
     await toPlay(p);
     await p.evaluate(() => { __SS.god(); __SS.clear(); __SS.P.fireCd = 0; __SS.bolts.length = 0; });
+    const cdp = await p.context().newCDPSession(p);
+    const busy = (iters) => p.evaluate((n) => {
+      const t0 = performance.now();
+      let x = 1;
+      for (let i = 0; i < n; i++) x = Math.imul(x ^ i, 1664525) + 1013904223 | 0;
+      return performance.now() - t0;
+    }, iters);
+    const iters = 1200000;
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+    await busy(iters);
+    const baseMs = await busy(iters);
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 4 });
+    await busy(Math.floor(iters / 4));
+    const throttledMs = await busy(iters);
+    const ratio = baseMs > 0 ? throttledMs / baseMs : 0;
     await p.evaluate(() => {
       window.__raf = [];
       let last = 0;
       const loop = (t) => { if (last) window.__raf.push(t - last); last = t; requestAnimationFrame(loop); };
       requestAnimationFrame(loop);
     });
-    // calibration window: title is not the load we care about; warm the play loop first
     await p.keyboard.down('ArrowRight');
     await p.keyboard.down('Space');
     await p.waitForTimeout(400);
     await p.evaluate(() => { window.__raf = []; });
-    const windows = [];
-    for (let i = 0; i < 4; i++) {
-      await p.evaluate(() => { window.__rafMark = window.__raf.length; });
-      if (i % 2) { await p.keyboard.up('ArrowRight'); await p.keyboard.down('ArrowLeft'); }
-      else { await p.keyboard.up('ArrowLeft'); await p.keyboard.down('ArrowRight'); }
-      await p.waitForTimeout(1500);
-      const w = await p.evaluate(() => window.__raf.slice(window.__rafMark));
-      windows.push(w);
-    }
+    await p.waitForTimeout(4000);
     await p.keyboard.up('ArrowRight');
-    await p.keyboard.up('ArrowLeft');
     await p.keyboard.up('Space');
-    const all = windows.flat().filter(x => x > 0 && x < 200);
-    const sorted = all.slice().sort((a, c) => a - c);
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+    const samples = await p.evaluate(() => window.__raf.filter(x => x > 0 && x < 200));
+    const sorted = samples.slice().sort((a, c) => a - c);
     const p95 = sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))] : 999;
-    const over = all.filter(x => x > 25).length;
-    const pct = all.length ? over / all.length : 1;
-    const per = windows.map(w => {
-      const s = w.filter(x => x > 0 && x < 200).slice().sort((a, c) => a - c);
-      const q = s.length ? s[Math.min(s.length - 1, Math.floor(s.length * 0.95))] : 999;
-      const o = s.filter(x => x > 25).length;
-      return { n: s.length, p95: +q.toFixed(2), overPct: s.length ? +(o / s.length).toFixed(3) : 1 };
-    });
-    ok('stage1 moving+firing rAF p95 <= 20ms (4 windows)', p95 <= 20, { p95: +p95.toFixed(2), n: all.length, per });
-    ok('stage1 moving+firing frames >25ms <= 5%', pct <= 0.05, { pct: +pct.toFixed(4), over, n: all.length, per });
-    fs.writeFileSync(D + 'raf-stage1.json', JSON.stringify({ p95, pct, over, n: all.length, per }, null, 2));
+    const over = samples.filter(x => x > 25).length;
+    const pct = samples.length ? over / samples.length : 1;
+    const record = {
+      cpuThrottle: 4,
+      calibration: { busyIters: iters, baselineMs: +baseMs.toFixed(2), throttledMs: +throttledMs.toFixed(2), ratio: +ratio.toFixed(2) },
+      samples: samples.length,
+      p95: +p95.toFixed(2),
+      over25: over,
+      over25Pct: +pct.toFixed(4),
+      note: 'Single stage-1 moving+firing rAF sample while Emulation.setCPUThrottlingRate is 4. Ratio is throttled busy-loop time divided by the unthrottled baseline.'
+    };
+    fs.writeFileSync(D + 'raf-stage1-4x.json', JSON.stringify(record, null, 2));
+    ok('4x CPU throttle calibrated near 4x', ratio >= 3 && ratio <= 6, record.calibration);
+    ok('4x stage1 moving+firing rAF p95 <= 20ms', p95 <= 20, record);
+    ok('4x stage1 moving+firing frames >25ms <= 5%', pct <= 0.05, record);
   }
 
   ok('no page errors', errs.length === 0, errs);
