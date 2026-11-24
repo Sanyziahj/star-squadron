@@ -44,7 +44,8 @@ async function heldFit(page) {
 
   async function phone(w, h) {
     const p = await b.newPage({ viewport: { width: w, height: h }, hasTouch: true, isMobile: true });
-    await p.addInitScript(() => { window.__SS_DEBUG = true; });
+    // AUTO-FIRE (2026-11-24) is pinned OFF here so 'creates no bolt' checks measure BACK/START only; auto-fire has its own tests in autofire-layout.test.cjs
+    await p.addInitScript(() => { window.__SS_DEBUG = true; try { localStorage.setItem('ssq-autofire', '0'); } catch (e) {} });
     p.on('pageerror', e => errs.push(w + 'x' + h + ' ' + e.message));
     p.on('console', x => { if (x.type() === 'error') errs.push(w + 'x' + h + ' ' + x.text()); });
     await p.goto(URL);
